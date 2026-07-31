@@ -1,0 +1,190 @@
+---
+# ─── NAMESPACE ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ecell
+
+---
+# ─── POSTGRES SECRET ─────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ecell-db-secret
+  namespace: ecell
+type: Opaque
+stringData:
+  POSTGRES_USER: ecell_user
+  POSTGRES_PASSWORD: ecell_secret
+  POSTGRES_DB: ecell_db
+  DATABASE_URL: postgres://ecell_user:ecell_secret@ecell-db-service:5432/ecell_db
+
+---
+# ─── POSTGRES PERSISTENT VOLUME ──────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ecell-db-pvc
+  namespace: ecell
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# ─── POSTGRES DEPLOYMENT ─────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ecell-db
+  namespace: ecell
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ecell-db
+  template:
+    metadata:
+      labels:
+        app: ecell-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: ecell-db-secret
+          volumeMounts:
+            - name: db-storage
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "ecell_user", "-d", "ecell_db"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: db-storage
+          persistentVolumeClaim:
+            claimName: ecell-db-pvc
+
+---
+# ─── POSTGRES SERVICE (ClusterIP - internal only) ────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: ecell-db-service
+  namespace: ecell
+spec:
+  selector:
+    app: ecell-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+
+---
+# ─── BACKEND DEPLOYMENT ──────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ecell-backend
+  namespace: ecell
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ecell-backend
+  template:
+    metadata:
+      labels:
+        app: ecell-backend
+    spec:
+      containers:
+        - name: ecell-backend
+          image: devshaik010/ecell-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5000
+          env:
+            - name: PORT
+              value: "5000"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ecell-db-secret
+                  key: DATABASE_URL
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+---
+# ─── BACKEND SERVICE (NodePort 30001) ────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: ecell-backend-service
+  namespace: ecell
+spec:
+  selector:
+    app: ecell-backend
+  type: NodePort
+  ports:
+    - port: 5000
+      targetPort: 5000
+      nodePort: 30001
+
+---
+# ─── FRONTEND DEPLOYMENT ─────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ecell-frontend
+  namespace: ecell
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ecell-frontend
+  template:
+    metadata:
+      labels:
+        app: ecell-frontend
+    spec:
+      containers:
+        - name: ecell-frontend
+          image: devshaik010/ecell-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5173
+          env:
+            - name: VITE_BACKEND_URL
+              value: "http://ecell-backend-service:5000"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5173
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+---
+# ─── FRONTEND SERVICE (NodePort 30000) ───────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: ecell-frontend-service
+  namespace: ecell
+spec:
+  selector:
+    app: ecell-frontend
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: 5173
+      nodePort: 30000
